@@ -128,4 +128,18 @@ describe('exportSpec (integration)', () => {
       }
     }
   });
+
+  it('documents the /videos endpoints with their methods', () => {
+    const paths = document.paths as Record<string, Record<string, unknown>>;
+
+    expect(Object.keys(paths['/videos'])).toEqual(['post']);
+    expect(Object.keys(paths['/videos/{slug}'])).toEqual(['get']);
+    expect(Object.keys(paths['/videos/{slug}/upload'])).toEqual(['get']);
+    expect(Object.keys(paths['/videos/{slug}/upload/complete'])).toEqual([
+      'post',
+    ]);
+    for (const endpoint of ['stream', 'download', 'thumbnail']) {
+      expect(paths[`/videos/{slug}/${endpoint}`].get).toBeDefined();
+    }
+  });
 });

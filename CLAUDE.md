@@ -12,19 +12,21 @@ This is a monorepo with two main areas:
 
 - `nestjs-project/` — Backend API (NestJS 11, TypeScript, Express). Contains modules for users, channels, videos, comments, etc.
 - `docs/` — Project documentation, architecture diagrams, and planning.
-- `next-frontend/` (Next.js) — not yet initialized
+- `next-frontend/` — Frontend (Next.js); Phases 01–02 implemented. The video UI is not part of Phase 03.
 
 ## Architecture (C4 Container Diagram)
 
 See `docs/diagrams/software-arch.mermaid` for the full diagram. Key containers:
 
-- **Frontend** (Next.js) → calls API via REST, streams from Object Storage
-- **API** (Nest.js) → business rules, auth, reads/writes DB, uploads to storage, publishes jobs to queue, sends emails
-- **Video Worker** (FFmpeg) → consumes jobs from queue, processes videos, updates DB and storage
-- **Database** (PostgreSQL) → users, channels, videos, comments, likes
-- **Object Storage** (S3/MinIO) → video files and thumbnails
-- **Message Queue** (TBD) → video processing job queue
+- **Frontend** (Next.js) → calls API via REST, uploads video parts and streams directly from Object Storage through presigned URLs
+- **API** (Nest.js, `nestjs-project/src/`) → business rules, auth, reads/writes DB, orchestrates S3 multipart uploads (presigned part URLs — video bytes never pass through the API), publishes jobs to the queue, redirects playback/download to presigned URLs, sends emails
+- **Video Worker** (FFmpeg, `nestjs-project/src/worker.ts`, Compose service `video-worker`) → consumes `process-video` jobs, runs `ffprobe`/`ffmpeg` over a presigned URL, stores the thumbnail, updates the video status in the DB
+- **Database** (PostgreSQL) → users, channels, videos (comments and likes in later phases)
+- **Object Storage** (S3-compatible; MinIO in Docker, S3 in production) → video files and thumbnails, private bucket, keys `videos/{id}/source` and `videos/{id}/thumbnail.jpg`
+- **Message Queue** (BullMQ on Redis) → `video-processing` queue with retries (3 attempts, exponential backoff)
 - **Email Service** (SMTP) → account confirmation and password recovery
+
+Videos (Phase 03) — endpoints, status cycle, worker and testing helpers: see `nestjs-project/CLAUDE.md` → "Videos (Phase 03)".
 
 ## Docker Networking
 
