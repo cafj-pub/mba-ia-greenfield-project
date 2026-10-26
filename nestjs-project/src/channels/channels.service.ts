@@ -1,21 +1,11 @@
 import { Injectable } from '@nestjs/common';
-import { DataSource, QueryFailedError } from 'typeorm';
+import { DataSource } from 'typeorm';
+import { isPgUniqueViolationOnColumn } from '../common/database/pg-errors';
 import { appendRandomSuffix, sanitizeNickname } from './nickname.util';
 import { Channel } from './entities/channel.entity';
 
-const PG_UNIQUE_VIOLATION = '23505';
 const NICKNAME_COLUMN = 'nickname';
 const MAX_RETRIES = 5;
-
-function isPgUniqueViolationOnColumn(err: unknown, column: string): boolean {
-  if (!(err instanceof QueryFailedError)) return false;
-  const e = err as any;
-  return (
-    e.code === PG_UNIQUE_VIOLATION &&
-    typeof e.detail === 'string' &&
-    e.detail.includes(column)
-  );
-}
 
 @Injectable()
 export class ChannelsService {

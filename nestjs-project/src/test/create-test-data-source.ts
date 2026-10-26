@@ -1,12 +1,15 @@
 import { DataSource, EntitySchema, MigrationInterface } from 'typeorm';
 
+// Any entity class (constructor), without the unsafe global `Function` type
+type EntityClass = abstract new (...args: never[]) => unknown;
+
 interface TestDataSourceOptions {
   synchronize?: boolean;
   migrations?: (new () => MigrationInterface)[];
 }
 
 export function createTestDataSource(
-  entities: (Function | string | EntitySchema<any>)[],
+  entities: (EntityClass | string | EntitySchema<any>)[],
   options: TestDataSourceOptions = {},
 ): DataSource {
   const { synchronize = true, migrations } = options;
