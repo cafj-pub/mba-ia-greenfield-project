@@ -17,6 +17,24 @@ services:
       minio-init:
         condition: service_completed_successfully
 
+  # Consumes the video-processing queue (phase-03-videos/TD-04): same image and
+  # codebase as the API, separate process. Restart it to pick up code changes.
+  video-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    command: ["npm", "run", "start:worker"]
+    volumes:
+      - .:/home/node/app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
   db:
     image: postgres:17
     ports:
