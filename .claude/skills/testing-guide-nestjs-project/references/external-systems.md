@@ -37,52 +37,17 @@ How each external system is handled in tests. These strategies were confirmed wi
 
 ---
 
-## Object Storage — Local Filesystem
+## Object Storage — Real MinIO (Docker)
 
-**Strategy:** Local filesystem storage in development and tests. S3 in production.
+**Strategy:** Real S3-compatible storage via the Docker `minio` service in `compose.yaml` (same S3 API as production — `phase-03-videos/TD-03`). Do not replace it with a filesystem adapter: presigned multipart upload, `ListParts`, `CompleteMultipartUpload` and presigned GET URLs have no filesystem equivalent.
 
-**Approach:**
-- The storage layer should use an abstraction (e.g., `StorageService` interface) that allows switching between local filesystem and S3
-- In tests, use the local filesystem adapter — no mocking needed
-- Use a temporary directory for test uploads: `os.tmpdir()` or a dedicated `test-uploads/` directory
-- Clean up test files in `afterAll`
+**Connection config for tests:** read `S3_ENDPOINT` (internal, `http://minio:9000`), `S3_PUBLIC_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` from `.env` (loaded by `setupFiles: ["dotenv/config"]`). Never use `localhost` for server-side calls.
 
-**Setup pattern:**
-```typescript
-// In test module setup
-{
-  provide: 'STORAGE_CONFIG',
-  useValue: {
-    driver: 'local',
-    basePath: path.join(os.tmpdir(), 'streamtube-test-uploads'),
-  },
-}
-```
+**Presigned URLs in tests:** URLs handed to clients are signed for `S3_PUBLIC_ENDPOINT` (`http://localhost:9000` in dev), which is unreachable from inside the container. To exercise them from Jest, send the request to the internal host while keeping the signed `Host` header (SigV4 signs `host`) — see `src/test/s3.ts`.
 
-**Integration test:**
-```typescript
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
-
-describe('StorageService (integration)', () => {
-  const testDir = path.join(os.tmpdir(), 'streamtube-test-uploads');
-
-  afterAll(() => {
-    fs.rmSync(testDir, { recursive: true, force: true });
-  });
-
-  it('should upload and retrieve a file', async () => {
-    const buffer = Buffer.from('test content');
-    const key = await storageService.upload(buffer, 'test.txt');
-
-    const retrieved = await storageService.get(key);
-    expect(retrieved.toString()).toBe('test content');
-  });
-});
-```
-
----
+**Test isolation:**
+- Write test objects under a per-suite key prefix (e.g. `test/<suite>/...`) or per-video UUID keys
+- Delete created objects in `afterEach`/`afterAll`
 
 ## Message Queue — Real (Docker)
 
