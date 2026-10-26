@@ -1,12 +1,19 @@
 import { ArgumentsHost } from '@nestjs/common';
 import { DomainExceptionFilter } from './domain-exception.filter';
 import {
+  ChannelNotFoundException,
+  DomainException,
   EmailAlreadyExistsException,
   EmailNotConfirmedException,
   InvalidCredentialsException,
   InvalidTokenException,
   TokenExpiredException,
   TokenReuseDetectedException,
+  UploadIncompleteException,
+  UploadSizeMismatchException,
+  VideoNotFoundException,
+  VideoNotReadyException,
+  InvalidVideoStatusException,
 } from '../exceptions/domain.exception';
 
 describe('DomainExceptionFilter', () => {
@@ -98,4 +105,50 @@ describe('DomainExceptionFilter', () => {
       message: expect.any(String),
     });
   });
+
+  it.each<[DomainException, number, string, string]>([
+    [new VideoNotFoundException(), 404, 'VIDEO_NOT_FOUND', 'Video not found'],
+    [
+      new ChannelNotFoundException(),
+      404,
+      'CHANNEL_NOT_FOUND',
+      'Channel not found',
+    ],
+    [
+      new InvalidVideoStatusException(),
+      409,
+      'INVALID_VIDEO_STATUS',
+      'Video is not awaiting upload',
+    ],
+    [
+      new UploadIncompleteException(),
+      409,
+      'UPLOAD_INCOMPLETE',
+      'Upload is missing parts',
+    ],
+    [
+      new UploadSizeMismatchException(),
+      422,
+      'UPLOAD_SIZE_MISMATCH',
+      'Uploaded size does not match the declared size',
+    ],
+    [
+      new VideoNotReadyException(),
+      409,
+      'VIDEO_NOT_READY',
+      'Video is not ready',
+    ],
+  ])(
+    'maps %p to %i with its catalog code',
+    (exception, status, error, message) => {
+      filter.catch(exception, mockHost);
+
+      expect(mockStatus).toHaveBeenCalledWith(status);
+      expect(mockJson).toHaveBeenCalledWith({
+        statusCode: status,
+        error,
+        message,
+      });
+    },
+  );
 });
