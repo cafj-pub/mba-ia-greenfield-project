@@ -118,3 +118,63 @@ Content-Type: {{contentType}}
   "token": "{{resetToken}}",
   "new_password": "new-password123"
 }
+
+
+###
+# ─────────────────────────────────────────────
+# VÍDEOS — UPLOAD, PROCESSAMENTO E ENTREGA
+# ─────────────────────────────────────────────
+# Fluxo: 10 → 11 (um PUT por parte, direto no MinIO) → 13 → 12 até "ready" → 14/15/16
+# Requer o login (passo de login acima) para preencher {{accessToken}}.
+
+@videoFile = ./sample.mp4
+@videoSize = 1048576
+@videoSlug = {{createVideo.response.body.$.video.slug}}
+@part1Url = {{createVideo.response.body.$.upload.parts[0].url}}
+
+### 10. Iniciar upload — cria o vídeo como rascunho e devolve uma URL pré-assinada por parte (64 MiB)
+# @name createVideo
+POST {{baseUrl}}/videos
+Authorization: Bearer {{accessToken}}
+Content-Type: {{contentType}}
+
+{
+  "title": "Meu primeiro vídeo",
+  "file_name": "sample.mp4",
+  "file_size": {{videoSize}},
+  "mime_type": "video/mp4"
+}
+
+
+### 11. Enviar a parte 1 direto ao object storage (o arquivo não passa pela API)
+# Ajuste @videoFile/@videoSize para o arquivo real; repita para cada parte de upload.parts
+PUT {{part1Url}}
+
+< {{videoFile}}
+
+
+### 12. Consultar o vídeo (somente o dono) — acompanhe status: draft → processing → ready | failed
+GET {{baseUrl}}/videos/{{videoSlug}}
+Authorization: Bearer {{accessToken}}
+
+
+### 13. Concluir o upload — monta o arquivo e enfileira o processamento (202)
+POST {{baseUrl}}/videos/{{videoSlug}}/upload/complete
+Authorization: Bearer {{accessToken}}
+
+
+### 13b. Retomar upload interrompido — lista partes enviadas e reemite URLs das que faltam
+GET {{baseUrl}}/videos/{{videoSlug}}/upload
+Authorization: Bearer {{accessToken}}
+
+
+### 14. Streaming (público) — 302 para URL pré-assinada; o storage responde a Range com 206
+GET {{baseUrl}}/videos/{{videoSlug}}/stream
+
+
+### 15. Download (público) — 302 para URL com Content-Disposition: attachment
+GET {{baseUrl}}/videos/{{videoSlug}}/download
+
+
+### 16. Thumbnail (pública) — 302 para o JPEG gerado pelo worker
+GET {{baseUrl}}/videos/{{videoSlug}}/thumbnail
