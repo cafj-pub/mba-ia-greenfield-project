@@ -13,6 +13,11 @@ docker compose ps   # all services must show status "running"
 Then verify each infrastructure service is actually ready to accept connections — not just running:
 
 - **PostgreSQL:** `docker compose exec db pg_isready -U streamtube` — expect `accepting connections`
+- **Redis (queue):** `docker compose exec redis redis-cli ping` — expect `PONG`
+- **MinIO (object storage):** `docker compose ps minio` shows `(healthy)`; `docker compose ps -a minio-init` shows `Exited (0)` (bucket created)
+- **Video worker:** `docker compose logs video-worker` contains `Video worker consuming the video-processing queue`
+
+`video-worker` is a background consumer, not the API server: it starts with `docker compose up -d` and that is expected.
 
 Only start the NestJS dev server (`npm run start:dev`) when the user **explicitly** asks to run the application — never as part of "start the environment".
 
@@ -34,6 +39,11 @@ docker compose exec nestjs-api npm run start:dev
 Services:
 - `nestjs-api` — NestJS API, port `3000`
 - `db` — PostgreSQL 17, port `5432`, database `streamtube`, user/password `streamtube`
+- `mailpit` — SMTP `1025`, web UI `8025`
+- `redis` — Redis 7 for BullMQ, port `6379` (AOF on, `maxmemory-policy noeviction`)
+- `minio` — S3-compatible object storage, API `9000`, console `9001` (image `cgr.dev/chainguard/minio` — `minio/minio` is no longer on Docker Hub)
+- `minio-init` — one-shot `mc mb --ignore-existing` that creates the `S3_BUCKET` bucket, then exits 0
+- `video-worker` — same image/code as the API running `npm run start:worker` (`src/worker.ts`); consumes the `video-processing` queue. Not in watch mode: `docker compose restart video-worker` after changing worker code
 
 All verification and teardown commands run on the **host machine**:
 
@@ -44,9 +54,14 @@ curl http://localhost:3000
 # Verify PostgreSQL is ready (runs inside the db container)
 docker compose exec db pg_isready -U streamtube
 
+# Verify Redis / MinIO / worker
+docker compose exec redis redis-cli ping
+docker compose ps minio minio-init video-worker
+
 # Check container logs
 docker compose logs nestjs-api
 docker compose logs db
+docker compose logs video-worker
 
 # Tear down the entire environment
 docker compose down
@@ -84,12 +99,14 @@ curl http://localhost:3000
 
 ### Test execution
 
-Integration and e2e suites share a single test database. They **must** be run with `--runInBand`:
+Integration and e2e suites share a single test database. They **must** be run with `--runInBand` — both npm scripts already pass it (`"test": "jest --runInBand"`, `"test:e2e": "jest --config ./test/jest-e2e.json --runInBand"`), so the plain commands are safe:
 
 ```bash
-docker compose exec nestjs-api npm test -- --runInBand
-docker compose exec nestjs-api npm run test:e2e   # already configured
+docker compose exec nestjs-api npm test
+docker compose exec nestjs-api npm run test:e2e
 ```
+
+Running `npx jest` directly bypasses the scripts — add `--runInBand` yourself.
 
 Parallel execution causes FK violations, deadlocks, and cross-suite contamination because suites truncate or seed shared tables concurrently.
 
@@ -124,6 +141,8 @@ These settings are required in `package.json` (jest config) and `test/jest-e2e.j
 
 Do not add new test-file suffixes; if a new test type is needed, update the regex deliberately.
 
+- `forceExit: true` (unit/integration config only) — the `@css-inline/css-inline` native addon, loaded by the mailer's `HandlebarsAdapter`, leaves a `CustomGC` handle (`npx jest --detectOpenHandles`) that test code cannot close; without it `npm test` prints the summary but never exits. Do not use it to hide handles your own tests leave open — close modules, apps and connections in `afterAll`.
+
 ## Environment File Conventions
 
 `.env` is parsed by both Docker Compose and `dotenv` — values containing shell-special characters (`<`, `>`, `|`, `&`, spaces) **must be quoted** or rewritten:
@@ -148,6 +167,49 @@ NestJS with standard module structure. Source lives in `src/`, compiled output i
 
 - Each domain feature gets its own module (e.g., `UsersModule`, `VideosModule`) registered in `AppModule`
 - Controllers handle HTTP routing; Services hold business logic; both are scoped to their module
+
+## Videos (Phase 03)
+
+Upload, processing and delivery of videos up to 10 GiB. Decisions: `docs/decisions/technical-decisions-phase-03-videos.md`; plan and contracts: `docs/phases/phase-03-videos/phase-03-videos.md`.
+
+**Upload never passes through the API.** `POST /videos` creates the row as `draft` and an S3 multipart upload, and returns one presigned `UploadPart` URL per 64 MiB part; the client `PUT`s each part straight to MinIO/S3, then calls `complete`.
+
+| Endpoint | Auth | Purpose |
+|----------|------|---------|
+| `POST /videos` | owner (Bearer) | Draft + presigned part URLs (`file_size` ≤ 10737418240, MIME `video/mp4`, `video/webm`, `video/quicktime`, `video/x-matroska`) |
+| `GET /videos/:slug` | owner | Record with `status`, `duration_seconds`, `metadata` — other users get `404 VIDEO_NOT_FOUND` |
+| `GET /videos/:slug/upload` | owner | Resume: parts already stored + fresh URLs for missing parts |
+| `POST /videos/:slug/upload/complete` | owner | Verifies parts and total size, assembles, `draft → processing`, enqueues `process-video` (202) |
+| `GET /videos/:slug/stream` | public | `302` to a 15-min presigned GET; storage serves `Range` → `206` |
+| `GET /videos/:slug/download` | public | `302` to a presigned GET with `Content-Disposition: attachment` |
+| `GET /videos/:slug/thumbnail` | public | `302` to the presigned JPEG thumbnail |
+
+Public endpoints answer `409 VIDEO_NOT_READY` unless `status = ready`. `VideosController` has `@SkipThrottle()` — the auth `ThrottlerGuard` is registered as `APP_GUARD` and is therefore global.
+
+**Status cycle** (`video_status` enum, every change is a conditional `UPDATE … WHERE status = <from>`): `draft → processing` (complete), `draft → failed` (uploaded size ≠ declared, `422 UPLOAD_SIZE_MISMATCH`), `processing → ready` (worker), `processing → failed` (worker, after the last attempt).
+
+**Unique URL:** `slug` = 11-char base64url (`src/videos/slug.util.ts`), `UNIQUE` index + retry on collision.
+
+**Code map:**
+
+- `src/videos/` — `VideosController`, `VideosService` (draft/resume/complete), `VideoDeliveryService` (presigned redirects), `VideoProcessingProducer`, `video-processing.job.ts` (job payload + options), `videos.constants.ts`, `entities/video.entity.ts`, `dto/`
+- `src/storage/` — `StorageModule` with two `S3Client`s: internal (`S3_ENDPOINT`, server-side calls and worker input URLs) and public (`S3_PUBLIC_ENDPOINT`, only signs URLs returned to clients). Both use `requestChecksumCalculation: 'WHEN_REQUIRED'` — the SDK default embeds a checksum into presigned part URLs that real uploads cannot match
+- `src/video-worker/` + `src/worker.ts` — standalone Nest application context (`VideoWorkerModule`): `VideoProcessingProcessor` (`@Processor('video-processing', { concurrency: 1 })`), `VideoProcessingService`, `MediaService` (spawns `ffprobe`/`ffmpeg` on a presigned **internal** URL — no local copy; thumbnail at 10% of duration, 1280px wide)
+- `src/common/infra/root-modules.ts` — `databaseRootModule()` / `queueRootModule()` shared by `AppModule` and `VideoWorkerModule`
+- Storage keys (bucket `S3_BUCKET`, private): `videos/{id}/source`, `videos/{id}/thumbnail.jpg`
+
+**Queue:** BullMQ on Redis, queue `video-processing`, job `process-video` with `{ videoId }`, `jobId = videoId` (dedup), 3 attempts, exponential backoff 5s → 10s. A file with no video stream throws `UnsupportedMediaError` → `UnrecoverableError` (fails at once). The `failed` event marks the video `failed` only on the final attempt.
+
+**Env vars:** `S3_ENDPOINT`, `S3_PUBLIC_ENDPOINT`, `S3_REGION`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` (required, also MinIO root credentials), `S3_BUCKET`, `REDIS_HOST`, `REDIS_PORT`, `QUEUE_PREFIX`. The worker validates with `workerEnvValidationSchema` (JWT secrets optional).
+
+**Testing videos:**
+
+- Storage and queue are real (MinIO + Redis from Compose); never mock them in integration/e2e tests.
+- `src/test/s3.ts` → `requestPresignedUrl()` calls a URL signed for `localhost:9000` from inside the container (connects to `S3_ENDPOINT`, keeps the signed `Host`).
+- `src/test/queue.ts` → `testBullRootModule()` uses the `test` prefix so the running `video-worker` never consumes test jobs; obliterate the queue in `afterAll`.
+- `src/test/media-fixtures.ts` → generates MP4 fixtures with ffmpeg at test time (nothing binary committed).
+- `test/videos-flow.e2e-spec.ts` exercises the full pipeline through the Compose `video-worker` — the stack must be up and the worker running current code.
+- Clean up MinIO objects in `afterEach` (abort open uploads, delete assembled sources and thumbnails).
 
 ## Code Conventions
 
